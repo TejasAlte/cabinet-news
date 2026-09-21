@@ -14,28 +14,48 @@ export interface RssSourceConfig {
 }
 
 export const RSS_SOURCES: RssSourceConfig[] = [
-  {
-    name: 'toi-india',
-    publisher: 'The Times of India',
-    rssUrl: 'https://timesofindia.indiatimes.com/rss_toinews.cms',
-    homepageUrl: 'https://timesofindia.indiatimes.com/india',
-  },
-  {
-    name: 'the-hindu-national',
-    publisher: 'The Hindu',
-    rssUrl: 'https://www.thehindu.com/news/national/feeder/',
-    homepageUrl: 'https://www.thehindu.com/news/national/',
-  },
-  {
-    name: 'indian-express-india',
-    publisher: 'The Indian Express',
-    rssUrl: 'https://indianexpress.com/section/india/feed/',
-    homepageUrl: 'https://indianexpress.com/section/india/',
-  },
-  {
-    name: 'ani-india',
-    publisher: 'ANI News',
-    rssUrl: 'https://www.aninews.in/rss/national-news.xml',
-    homepageUrl: 'https://www.aninews.in/',
-  },
+// {
+//     name: 'toi-india',
+//     publisher: 'The Times of India',
+//     rssUrl: 'https://timesofindia.indiatimes.com/rss_toinews.cms',
+//     homepageUrl: 'https://timesofindia.indiatimes.com/india',
+//   },
+//   {
+//     name: 'the-hindu-national',
+//     publisher: 'The Hindu',
+//     rssUrl: 'https://www.thehindu.com/news/national/feeder/',
+//     homepageUrl: 'https://www.thehindu.com/news/national/',
+//   },
+//   {
+//     name: 'indian-express-india',
+//     publisher: 'The Indian Express',
+//     rssUrl: 'https://indianexpress.com/section/india/feed/',
+//     homepageUrl: 'https://indianexpress.com/section/india/',
+//   },
+//   {
+//     name: 'ani-india',
+//     publisher: 'ANI News',
+//     rssUrl: 'https://www.aninews.in/rss/national-news.xml',
+//     homepageUrl: 'https://www.aninews.in/',
+//   },
+
+{
+  name: 'toi-india',
+  publisher: 'The Times of India',
+  rssUrl: 'https://timesofindia.indiatimes.com/rssfeeds/-2128936835.cms',
+  homepageUrl: 'https://timesofindia.indiatimes.com/india',
+},
+{
+  name: 'the-hindu-national',
+  publisher: 'The Hindu',
+  rssUrl: 'https://www.thehindu.com/news/national/feeder/default.rss',
+  homepageUrl: 'https://www.thehindu.com/news/national/',
+},
+{
+  name: 'ani-india',
+  publisher: 'ANI News',
+  rssUrl: 'https://www.aninews.in/rss/feed/category/national.xml',
+  homepageUrl: 'https://www.aninews.in/',
+},
+
 ];

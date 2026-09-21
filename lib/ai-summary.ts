@@ -102,7 +102,8 @@ export async function generateSummary(article: RawArticle): Promise<AiSummaryRes
       people: Array.isArray(parsed.people) ? parsed.people.slice(0, 10) : [],
     };
   } catch (err) {
-    console.error('[ai-summary] falling back to deterministic summary:', (err as Error).message);
+    // console.error('[ai-summary] falling back to deterministic summary:', (err as Error).message);
+    // OpenAI unavailable — silently use deterministic summary
     return deterministicSummary(article);
   }
 }
