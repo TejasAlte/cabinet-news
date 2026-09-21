@@ -183,18 +183,6 @@ async function seedHouse(
 export async function runSeed() {
   const db = getServiceClient();
 
-  // const [lsRoster, rsRoster] = await Promise.all([
-  //   fetchRoster(LS_ENDPOINT, 'Lok Sabha'),
-  //   fetchRoster(RS_ENDPOINT, 'Rajya Sabha'),
-  // ]);
-
-  // console.log(`[seed-members] fetched ${lsRoster.length} LS records, ${rsRoster.length} RS records`);
-
-  // // Only sitting members are marked active, but we still upsert former members
-  // // (active=false) so historical news stays linkable.
-  // const lsResult = await seedHouse(db, lsRoster, 'lok_sabha');
-  // const rsResult = rsRoster.length > 0 ? await seedHouse(db, rsRoster, 'rajya_sabha') : { upserted: 0, errors: 0 };
-
   const [lsAll, rsAll] = await Promise.all([
   fetchRoster(LS_ENDPOINT, 'Lok Sabha'),
   fetchRoster(RS_ENDPOINT, 'Rajya Sabha'),
@@ -212,8 +200,6 @@ const lsResult = await seedHouse(db, lsRoster, 'lok_sabha');
 const rsResult = rsRoster.length
   ? await seedHouse(db, rsRoster, 'rajya_sabha')
   : { upserted: 0, errors: 0 };
-
-  //
 
   console.log('[seed-members] done:', JSON.stringify({ lsResult, rsResult }, null, 2));
   if (rsRoster.length === 0) {
