@@ -48,11 +48,17 @@ export async function getMemberBySlug(slug: string) {
   return data;
 }
 
-export async function getMemberNews(memberId: string, limit = 20) {
+export async function getMemberNews(memberId: string, limit = 50) {
   const db = getPublicClient();
   const { data, error } = await db
     .from('member_news')
-    .select('confidence, news:news ( id, slug, headline, summary, category, publisher, source_url, published_at, image_url )')
+    .select(
+      `confidence, matched_variant,
+       news:news (
+         id, slug, headline, summary, category, publisher, source_url, published_at, image_url,
+         source:news_sources ( name, publisher, homepage_url )
+       )`
+    )
     .eq('member_id', memberId)
     .order('news(published_at)', { ascending: false })
     .limit(limit);
