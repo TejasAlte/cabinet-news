@@ -1,0 +1,9 @@
+{
+  "_comment": "Optional backup scheduler. GitHub Actions (.github/workflows/scrape-news.yml) is the primary 10-minute trigger. If you also want Vercel Cron, replace CRON_SECRET_PLACEHOLDER below with your real CRON_SECRET value (Vercel Cron cannot read env vars into the path at build time) — or delete this file entirely to rely on GitHub Actions alone.",
+  "crons": [
+    {
+      "path": "/api/cron/scrape?secret=CRON_SECRET_PLACEHOLDER",
+      "schedule": "*/10 * * * *"
+    }
+  ]
+}

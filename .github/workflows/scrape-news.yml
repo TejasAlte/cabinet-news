@@ -1,0 +1,26 @@
+name: Scrape News
+
+on:
+  schedule:
+    # Every 10 minutes. GitHub Actions cron is best-effort and can lag under
+    # load — the dedupe logic in lib/dedupe.ts makes occasional skipped or
+    # delayed runs harmless.
+    - cron: '*/10 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Trigger scrape endpoint
+        run: |
+          response=$(curl -s -o /tmp/body.json -w "%{http_code}" \
+            -X POST "${{ secrets.APP_URL }}/api/cron/scrape" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}")
+          echo "HTTP status: $response"
+          cat /tmp/body.json
+          if [ "$response" -ge 300 ]; then
+            echo "Scrape endpoint returned an error"
+            exit 1
+          fi

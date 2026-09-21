@@ -1,0 +1,35 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  @apply bg-white text-navy-900 antialiased;
+}
+
+.container-page {
+  @apply mx-auto w-full max-w-6xl px-4 sm:px-6 lg:px-8;
+}
+
+.card {
+  @apply rounded-lg border border-slate-200 bg-white shadow-sm transition-shadow hover:shadow-md;
+}
+
+.badge {
+  @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium;
+}
+
+.badge-saffron {
+  @apply bg-saffron/10 text-saffron-700;
+}
+
+.badge-navy {
+  @apply bg-navy/10 text-navy;
+}
+
+.link-underline {
+  @apply underline decoration-saffron decoration-2 underline-offset-4 hover:text-saffron-700;
+}
