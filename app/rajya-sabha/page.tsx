@@ -1,14 +1,43 @@
-import { permanentRedirect } from 'next/navigation';
+import { Metadata } from "next";
+import MemberGrid from "@/components/MemberGrid";
+import { listMembers } from "@/lib/queries";
 
-interface Props {
-  params: Promise<{ slug: string }>;
-}
+export const metadata: Metadata = {
+  title: "Rajya Sabha Members | Cabinet News",
+  description:
+    "Browse all current Rajya Sabha Members of Parliament with verified news and profiles.",
+};
 
-// Mirrors app/lok-sabha/[slug]/page.tsx. Member profiles are canonically
-// served from /member/[slug] (MemberGrid, search and the sitemap all link
-// there); this route exists so /rajya-sabha/[slug] also resolves, without
-// duplicating the profile render or splitting SEO signals across two paths.
-export default async function RajyaSabhaMemberPage({ params }: Props) {
-  const { slug } = await params;
-  permanentRedirect(`/member/${slug}`);
+export default async function RajyaSabhaPage() {
+  const { members, total } = await listMembers({
+    house: "rajya_sabha",
+    page: 1,
+    pageSize: 24,
+  });
+
+  const initialMembers = members.map((m) => ({
+    ...m,
+    party: Array.isArray(m.party) ? m.party[0] ?? null : m.party,
+    state: Array.isArray(m.state) ? m.state[0] ?? null : m.state,
+    constituency: Array.isArray(m.constituency)
+      ? m.constituency[0] ?? null
+      : m.constituency,
+  }));
+
+  return (
+    <main className="container mx-auto px-4 py-8">
+      <div className="mb-8">
+        <h1 className="text-3xl font-bold tracking-tight">Rajya Sabha</h1>
+        <p className="mt-2 text-muted-foreground">
+          Current Members of Parliament from the Council of States
+        </p>
+      </div>
+
+      <MemberGrid
+        house="rajya_sabha"
+        initialMembers={initialMembers}
+        initialTotal={total}
+      />
+    </main>
+  );
 }

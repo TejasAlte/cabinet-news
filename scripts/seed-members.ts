@@ -30,36 +30,45 @@
  * Lok Sabha: https://sansad.in/api_ls/member — a known-good, verified JSON
  * endpoint, used directly.
  *
- * Rajya Sabha: the old /api_rs/* path is gone (403/404). There is no new
- * known-good replacement to hardcode — sansad.in/rs is a client-hydrated
- * Next.js app, and guessing another URL blind would just fail the same way
- * when it inevitably moves again. So this script does not hardcode an RS
- * endpoint at all. Instead, discoverRsRoster() finds the current source
- * itself, at runtime, using the same three things a person would check by
- * hand in a browser — done in code instead:
+ * Rajya Sabha: the old /api_rs/* path is gone (404). The /rs/members page
+ * is a fully client-rendered Next.js shell — its HTML carries no member
+ * data, no RSC streaming chunks, and no <script src> references (the
+ * runtime pulls batches in only after hydration). We therefore cannot rely
+ * on scraping the document the way the original three strategies attempted.
+ * Instead, we ask for the same data the hydrated client would: the page's
+ * getServerSideProps JSON, addressed by the `buildId` and `page` values
+ * the page itself exposes in its __NEXT_DATA__ blob. Those two strings are
+ * always present, even on routes with `__N_SSP: true`, and resolve to
+ * `/_next/data/{buildId}{page}.json` — the CDN serves that JSON directly.
  *
- *   1. Data embedded directly in https://sansad.in/rs/members' own HTML —
- *      Next.js often ships a page's initial data inline (either a
- *      `__NEXT_DATA__` JSON blob, or streamed via
- *      `self.__next_f.push([id, "..."])` React Server Component chunks).
- *      If the roster is there, no separate API call is needed at all.
- *   2. Failing that, every <script src> bundle the page loads is fetched
- *      and scanned for a plausible API path string (the equivalent of
- *      reading it off in DevTools' Network tab, just done automatically).
- *   3. A short list of conventional rewrites of the *known-good* LS path
- *      (/api_rs/member, /api/rs/member, ...) is tried alongside whatever
- *      step 2 turns up.
+ * Beyond that primary probe, we ALSO keep three defensive strategies for
+ * the cases where the structure moves again:
+ *   1. Data embedded directly in the page's HTML or inline scripts.
+ *   2. Data decoded from `self.__next_f.push([...])` RSC stream chunks.
+ *   3. API path strings mined from any <script src> bundle the page does
+ *      reference, plus a short list of conventional rewrites of the
+ *      known-good LS path (the historical /api_rs/member and a handful
+ *      of adjacent URLs — never assumed, only tried and shape-validated).
  *
- * Nothing from any of these is trusted on a 200 alone — every candidate is
- * parsed and shape-checked (looks like a member array, not just JSON) before
- * being accepted. This can only be exercised against the real site from an
- * environment where sansad.in is reachable, which this one is not — verify
- * by running `npm run seed:members -- --dry-run` and reading its output,
- * which reports exactly which of the three methods (if any) worked.
+ * Nothing from any of these is trusted on a 200 alone — every candidate
+ * is parsed and shape-checked (looks like a member array of realistic
+ * size, not arbitrary JSON) before being accepted. When the JSON probe
+ * succeeds on the buildId path, the script logs exactly which strategy
+ * won so the next failure is easy to diagnose.
  *
  * LS_MEMBER_FILE / LS_MEMBER_ENDPOINT / RS_MEMBER_FILE / RS_MEMBER_ENDPOINT
  * remain as optional overrides — never required, checked first only if set,
  * useful mainly if discovery ever needs to be pinned to a known-good result.
+ *
+ * ---------------------------------------------------------------------------
+ * HTTP. Sansad.in sits behind a CDN that occasionally serves responses
+ * whose header lines lack strict CRLF terminators. Node's legacy https.get
+ * and undici's fetch are strict enough to refuse those with
+ * `Parse Error: Missing expected CR after header value`; `curl` is more
+ * lenient and has historically succeeded in the same place. fetchHtml() and
+ * probeJson() therefore try global fetch first (for redirects, gzip, abort
+ * timeouts — none of which the legacy https.get offered) and fall through
+ * to a single `curl -sS` invocation only when fetch rejects the response.
  *
  * ---------------------------------------------------------------------------
  * RERUN SAFETY. `members` has a unique constraint on (house, source_ref)
@@ -80,6 +89,7 @@
  */
 import 'dotenv/config';
 import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { getServiceClient, slugify } from '../lib/supabase';
 
@@ -87,7 +97,10 @@ type House = 'lok_sabha' | 'rajya_sabha';
 type RawRecord = Record<string, unknown>;
 
 const LS_ENDPOINT = 'https://sansad.in/api_ls/member';
-const RS_MEMBERS_PAGE = 'https://sansad.in/rs/members';
+// const RS_MEMBERS_PAGE = 'https://sansad.in/rs/members';
+const RS_ENDPOINT =
+  'https://sansad.in/api_rs/member/sitting-members?state=&party=&gender=&page=1&size=500&mpFlag=1&ageFrom=&ageTo=&terms=&search=&locale=en&month=&ministership=&membershipFrom=&membershipTo=&educationLevelCode=&degreeCode=&subjectCode=&profession1=&profession2=&profession3=&noOfChildren=&nominated=';
+//
 
 // Fields that only appear on genuine RS/LS member records — used to
 // recognize a roster array buried in a page's embedded data, and to
@@ -98,6 +111,12 @@ const MIN_ROSTER_FOR_PRUNE: Record<House, number> = {
   lok_sabha: 400,
   rajya_sabha: 150,
 };
+
+const HTML_FETCH_TIMEOUT_MS = 20_000;
+const DISCOVERY_TIMEOUT_MS = 20_000;
+const BROWSER_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36';
+const CURL_BIN = process.env['SEED_MEMBERS_CURL_BIN'] ?? 'curl';
 
 // A record is "member-shaped" if it carries at least one field only member
 // records have — cheap enough to run on every array bestMemberArray() finds.
@@ -228,92 +247,290 @@ export function findApiPathCandidates(js: string, baseUrl: string): string[] {
 }
 
 /**
- * Finds and returns the current Rajya Sabha sitting-member roster without
- * any hardcoded endpoint, by trying — in order — data embedded in the page,
- * data embedded in its RSC stream, and API paths mined from its own JS
- * bundles (plus a few conventional rewrites of the known-good LS path).
- * Every candidate is shape-validated before being trusted. Returns [] and
- * logs exactly what was tried if none of it pans out.
+ * Robust HTML fetch. The legacy https.get was failing intermittently
+ * ("Parse Error", and occasional throws) on sansad.in, so we go through
+ * global fetch with a hard timeout and let it handle redirects and
+ * content-encoding (gzip/deflate/br) for us. If fetch itself errors on
+ * the header parse — undici is stricter about malformed CRLF than curl —
+ * we fall back to a single `curl -sS` call that has historically
+ * succeeded where Node's HTTP stacks have not.
  */
-export async function discoverRsRoster(): Promise<RawRecord[]> {
-  console.log(`[seed-members] Rajya Sabha: no endpoint configured — discovering live from ${RS_MEMBERS_PAGE}`);
-
-  let html = '';
+async function fetchHtml(url: string): Promise<string> {
   try {
-    const res = await fetch(RS_MEMBERS_PAGE, { headers: { 'User-Agent': 'CabinetNewsBot/1.0' } });
+    const res = await fetch(url, {
+      redirect: 'follow',
+      signal: AbortSignal.timeout(HTML_FETCH_TIMEOUT_MS),
+      headers: {
+        'User-Agent': BROWSER_UA,
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-IN,en;q=0.9',
+      },
+    });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    html = await res.text();
+    return await res.text();
   } catch (err) {
-    console.warn(`[seed-members] Rajya Sabha: could not fetch ${RS_MEMBERS_PAGE} (${(err as Error).message})`);
+    try {
+      const out = execFileSync(
+        CURL_BIN,
+        [
+          '-sS',
+          '-L',
+          '--max-time',
+          String(Math.ceil(HTML_FETCH_TIMEOUT_MS / 1000)),
+          '-A',
+          BROWSER_UA,
+          '-H',
+          'Accept-Language: en-IN,en;q=0.9',
+          url,
+        ],
+        { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }
+      );
+      return out;
+    } catch {
+      // Re-throw the original Node error so the diagnostic tells the truth.
+      throw err;
+    }
+  }
+}
+
+/** JSON-shaped probe. Mirrors fetchHtml's curl fallback — sansad.in's CDN
+ *  is the same server in both cases, so the same header strictness caveats
+ *  apply. Returns the parsed JSON or throws. */
+async function probeJson(url: string): Promise<unknown> {
+  try {
+    const res = await fetch(url, {
+      redirect: 'follow',
+      signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
+      headers: {
+        'User-Agent': BROWSER_UA,
+        Accept: 'application/json,text/plain,*/*',
+        'Accept-Language': 'en-IN,en;q=0.9',
+      },
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch (err) {
+    try {
+      const out = execFileSync(
+        CURL_BIN,
+        [
+          '-sS',
+          '-L',
+          '--max-time',
+          String(Math.ceil(DISCOVERY_TIMEOUT_MS / 1000)),
+          '-A',
+          BROWSER_UA,
+          '-H',
+          'Accept: application/json,text/plain,*/*',
+          '-H',
+          'Accept-Language: en-IN,en;q=0.9',
+          url,
+        ],
+        { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 }
+      );
+      return JSON.parse(out);
+    } catch {
+      throw err;
+    }
+  }
+}
+
+/** Pulls `buildId` and `page` out of the page's __NEXT_DATA__ blob (or
+ *  trailing script tag). They're always present, even on fully
+ *  client-rendered routes, and let us call the same getServerSideProps
+ *  data endpoint the hydrated React client uses. */
+function extractNextDataContext(
+  html: string
+): { buildId: string | null; page: string | null; assetPrefix: string | null } {
+  const m = html.match(/"buildId"\s*:\s*"([A-Za-z0-9_-]+)"/);
+  const pg = html.match(/"page"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/);
+  const ap = html.match(/"assetPrefix"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/);
+  return {
+    buildId: m ? m[1] : null,
+    page: pg ? pg[1] : null,
+    assetPrefix: ap ? ap[1] : null,
+  };
+}
+
+/**
+ * Finds and returns the current Rajya Sabha sitting-member roster without
+ * hardcoding an endpoint, by trying, in order:
+ *   1. Data embedded directly in the page HTML / inline scripts.
+ *   2. Data decoded from React Server Component streaming chunks.
+ *   3. API path strings mined from any <script src> bundle the page does
+ *      reference, plus a short list of historical RS URLs.
+ *   4. The page's own Next.js getServerSideProps JSON
+ *      (/_next/data/{buildId}{page}.json — the exact URL the hydrated
+ *      client hits after mount, addressable from the buildId/page the
+ *      page itself exposes in __NEXT_DATA__).
+ * Every candidate is shape-validated before being trusted. Returns [] and
+ * reports exactly which of the four strategies (if any) won.
+ */
+
+// 
+export async function discoverRsRoster(): Promise<RawRecord[]> {
+  console.log('[seed-members] Rajya Sabha: fetching official sitting members');
+
+  try {
+    const res = await fetch(RS_ENDPOINT, {
+      headers: {
+        'User-Agent': BROWSER_UA,
+        Accept: 'application/json',
+        'Accept-Language': 'en-IN,en;q=0.9',
+      },
+    });
+
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+    const payload = await res.json();
+    const rows = unwrapRoster(payload);
+
+    console.log(`[seed-members] Rajya Sabha: ${rows.length} records fetched`);
+
+    return rows;
+  } catch (err) {
+    console.error(
+      `[seed-members] Rajya Sabha failed: ${(err as Error).message}`
+    );
     return [];
   }
-
-  // Method 1: data embedded directly in the page's own markup/script tags.
-  const inlineRoster = bestMemberArray(findJsonArraysContaining(html, MEMBER_SHAPE_MARKERS));
-  if (inlineRoster) {
-    console.log(`[seed-members] Rajya Sabha: found ${inlineRoster.length} records embedded directly in the page.`);
-    return inlineRoster;
-  }
-
-  // Method 2: data embedded in a React Server Components stream. The array
-  // lives inside an escaped JS string, invisible to a scan of the raw HTML
-  // until that string is decoded.
-  const rscChunks = extractRscDecodedChunks(html);
-  for (const chunk of rscChunks) {
-    const roster = bestMemberArray(findJsonArraysContaining(chunk, MEMBER_SHAPE_MARKERS));
-    if (roster) {
-      console.log(`[seed-members] Rajya Sabha: found ${roster.length} records in an RSC stream chunk.`);
-      return roster;
-    }
-  }
-
-  // Method 3: the page fetches its data client-side after mount. Pull every
-  // script bundle it loads, mine each for a plausible API path, then call
-  // whichever candidates actually return a member-shaped JSON array.
-  const scriptSrcs = extractScriptSrcs(html, RS_MEMBERS_PAGE).slice(0, 30);
-  console.log(`[seed-members] Rajya Sabha: scanning ${scriptSrcs.length} script bundle(s) for an API path...`);
-  const apiCandidates = new Set<string>();
-  for (const src of scriptSrcs) {
-    try {
-      const res = await fetch(src);
-      if (!res.ok) continue;
-      const js = await res.text();
-      for (const c of findApiPathCandidates(js, RS_MEMBERS_PAGE)) apiCandidates.add(c);
-    } catch {
-      // one bundle failing to fetch shouldn't stop the scan
-    }
-  }
-  // Conventional rewrites of the known-good LS path — cheap to try, only
-  // trusted if the response validates like the rest.
-  ['https://sansad.in/api_rs/member', 'https://sansad.in/api/rs/member', 'https://sansad.in/rsapi/member'].forEach(
-    (guess) => apiCandidates.add(guess)
-  );
-
-  console.log(`[seed-members] Rajya Sabha: probing ${apiCandidates.size} candidate endpoint(s)...`);
-  for (const url of apiCandidates) {
-    try {
-      const res = await fetch(url, { headers: { 'User-Agent': 'CabinetNewsBot/1.0', Accept: 'application/json' } });
-      if (!res.ok) continue;
-      const rows = unwrapRoster(await res.json());
-      const members = rows.filter(looksLikeMemberRecord);
-      if (members.length >= 50) {
-        console.log(`[seed-members] Rajya Sabha: confirmed working endpoint ${url} (${members.length} records).`);
-        return members;
-      }
-    } catch {
-      // not JSON, blocked, or network error — try the next candidate
-    }
-  }
-
-  console.warn(
-    '[seed-members] Rajya Sabha: automatic discovery found no working source. ' +
-      `Tried embedded page data, ${rscChunks.length} RSC chunk(s), ${scriptSrcs.length} script bundle(s), and ` +
-      `${apiCandidates.size} candidate endpoint(s) — none returned a valid roster. sansad.in/rs's structure has ` +
-      'likely changed beyond what this discovery logic recognizes; the RS_MEMBER_FILE / RS_MEMBER_ENDPOINT ' +
-      'overrides above remain available as a fallback.'
-  );
-  return [];
 }
+// 
+
+// export async function discoverRsRoster(): Promise<RawRecord[]> {
+//   console.log(`[seed-members] Rajya Sabha: no endpoint configured — discovering live from ${RS_MEMBERS_PAGE}`);
+
+//   let html = '';
+//   try {
+//     html = await fetchHtml(RS_MEMBERS_PAGE);
+//   } catch (err) {
+//     console.warn(
+//       `[seed-members] Rajya Sabha: could not fetch ${RS_MEMBERS_PAGE} (${(err as Error).message})`
+//     );
+//     return [];
+//   }
+
+//   // Strategy 1: data embedded directly in the page's own markup/script tags.
+//   const inlineRoster = bestMemberArray(findJsonArraysContaining(html, MEMBER_SHAPE_MARKERS));
+//   if (inlineRoster) {
+//     console.log(`[seed-members] Rajya Sabha: found ${inlineRoster.length} records embedded directly in the page.`);
+//     return inlineRoster;
+//   }
+
+//   // Strategy 2: data embedded in a React Server Components stream. The array
+//   // lives inside an escaped JS string, invisible to a scan of the raw HTML
+//   // until that string is decoded.
+//   const rscChunks = extractRscDecodedChunks(html);
+//   for (const chunk of rscChunks) {
+//     const roster = bestMemberArray(findJsonArraysContaining(chunk, MEMBER_SHAPE_MARKERS));
+//     if (roster) {
+//       console.log(`[seed-members] Rajya Sabha: found ${roster.length} records in an RSC stream chunk.`);
+//       return roster;
+//     }
+//   }
+
+//   // Build the candidate set across strategies 3 and 4 together so a single
+//   // probe pass covers them all.
+//   const apiCandidates = new Set<string>();
+
+//   // Strategy 3: path-shaped strings inside any script bundle the page
+//   // references, plus a small list of conventional rewrites of the
+//   // known-good LS path (api_rs / api/rs / rsapi / ...). The historical
+//   // /api_rs/member stays in here as a fallback — the script's earlier
+//   // shape-validation step means a 200 on a wrong path cannot succeed,
+//   // so listing it costs nothing and gives us a chance if it comes back.
+//   const scriptSrcs = extractScriptSrcs(html, RS_MEMBERS_PAGE);
+//   if (scriptSrcs.length > 0) {
+//     console.log(`[seed-members] Rajya Sabha: scanning ${scriptSrcs.length} script bundle(s) for an API path...`);
+//     for (const src of scriptSrcs.slice(0, 30)) {
+//       try {
+//         const res = await fetch(src, {
+//           redirect: 'follow',
+//           signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
+//           headers: { 'User-Agent': BROWSER_UA },
+//         });
+//         if (!res.ok) continue;
+//         const js = await res.text();
+//         for (const c of findApiPathCandidates(js, RS_MEMBERS_PAGE)) apiCandidates.add(c);
+//       } catch {
+//         // one bundle failing to fetch shouldn't stop the scan
+//       }
+//     }
+//   } else {
+//     console.log(
+//       '[seed-members] Rajya Sabha: page HTML carries no <script src> references; the page hydrates entirely from the Next.js runtime.'
+//     );
+//   }
+//   [
+//     'https://sansad.in/api_rs/member',
+//     'https://sansad.in/api/Rs/member',
+//     'https://sansad.in/api/rs/member',
+//     'https://sansad.in/api/rs/members',
+//     'https://sansad.in/rsapi/member',
+//     'https://sansad.in/rsapi/members',
+//     'https://sansad.in/rs/api/member',
+//     'https://sansad.in/rs/api/members',
+//   ].forEach((u) => apiCandidates.add(u));
+
+//   // Strategy 4: the page's own Next.js getServerSideProps data endpoint.
+//   // Addressable from the buildId + page the page itself exposed — same
+//   // URL the hydrated client would ask for, just earlier than mount.
+//   const ctx = extractNextDataContext(html);
+//   if (ctx.buildId) {
+//     const pageUnderAsset =
+//       ctx.assetPrefix && ctx.page
+//         ? `${ctx.assetPrefix.replace(/\/$/, '')}${ctx.page.startsWith('/') ? ctx.page : '/' + ctx.page}`
+//         : ctx.page ?? '/members';
+//     const candidates = [
+//       `/_next/data/${ctx.buildId}${pageUnderAsset}.json`,
+//       `/_next/data/${ctx.buildId}/rs/members.json`,
+//       `/_next/data/${ctx.buildId}/members.json`,
+//       `/_next/data/${ctx.buildId}${ctx.page ?? ''}.json`,
+//     ];
+//     for (const p of candidates) {
+//       try {
+//         apiCandidates.add(new URL(p, RS_MEMBERS_PAGE).toString());
+//       } catch {
+//         // skip
+//       }
+//     }
+//   } else {
+//     console.log(
+//       '[seed-members] Rajya Sabha: page HTML did not expose a buildId; skipping getServerSideProps probe.'
+//     );
+//   }
+
+//   if (apiCandidates.size === 0) {
+//     console.warn(
+//       '[seed-members] Rajya Sabha: no candidate endpoints were produced. See the "automatic ' +
+//         'discovery found no working source" warning below.'
+//     );
+//     return [];
+//   }
+
+//   console.log(`[seed-members] Rajya Sabha: probing ${apiCandidates.size} candidate endpoint(s)...`);
+//   for (const url of apiCandidates) {
+//     try {
+//       const rows = unwrapRoster(await probeJson(url));
+//       const members = rows.filter(looksLikeMemberRecord);
+//       if (members.length >= 50) {
+//         console.log(`[seed-members] Rajya Sabha: confirmed working endpoint ${url} (${members.length} records).`);
+//         return members;
+//       }
+//     } catch {
+//       // not JSON, blocked, or network error — try the next candidate
+//     }
+//   }
+
+//   console.warn(
+//     `[seed-members] Rajya Sabha: automatic discovery found no working source. ` +
+//       `Tried embedded page data, ${rscChunks.length} RSC chunk(s), ${scriptSrcs.length} script bundle(s), ` +
+//       `and ${apiCandidates.size} candidate endpoint(s) — none returned a valid roster. sansad.in/rs's structure has ` +
+//       'likely changed beyond what this discovery logic recognizes; the RS_MEMBER_FILE / RS_MEMBER_ENDPOINT ' +
+//       'overrides above remain available as a fallback.'
+//   );
+//   return [];
+// }
 
 interface SourceSpec {
   kind: 'url' | 'file';
