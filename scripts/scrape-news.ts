@@ -4,6 +4,7 @@
  *
  * Steps: fetch RSS -> normalize -> dedupe -> match MPs -> summarize -> persist -> link.
  */
+import 'dotenv/config';
 import { getServiceClient, slugify } from '../lib/supabase';
 import { fetchAllFeeds } from '../lib/rss-parser';
 import { isDuplicate } from '../lib/dedupe';
@@ -119,6 +120,12 @@ if (require.main === module) {
   runScrapePipeline()
     .then((r) => {
       console.log('[scrape-news] run complete:', JSON.stringify(r, null, 2));
+      //
+       if (r.errors.length) {
+        console.log('\n=== ERRORS ===');
+        r.errors.forEach((e) => console.log(e));
+      }
+      //
       process.exit(r.errors.length > 0 ? 1 : 0);
     })
     .catch((err) => {

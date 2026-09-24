@@ -1,44 +1,43 @@
-import type { Metadata } from 'next';
-import { listMembers } from '../../lib/queries';
-import MemberGrid from '../../components/MemberGrid';
+import { Metadata } from "next";
+import MemberGrid from "@/components/MemberGrid";
+import { listMembers } from "@/lib/queries";
 
 export const metadata: Metadata = {
-  title: 'Rajya Sabha Members',
-  description: 'Browse every current member of the Rajya Sabha, the upper house of the Parliament of India.',
+  title: "Rajya Sabha Members | Cabinet News",
+  description:
+    "Browse all current Rajya Sabha Members of Parliament with verified news and profiles.",
 };
 
-export const revalidate = 300;
-
 export default async function RajyaSabhaPage() {
-  let members: Awaited<ReturnType<typeof listMembers>>['members'] = [];
-  let total = 0;
-  let loadError = false;
+  const { members, total } = await listMembers({
+    house: "rajya_sabha",
+    page: 1,
+    pageSize: 24,
+  });
 
-  try {
-    const result = await listMembers({ house: 'rajya_sabha', page: 1 });
-    members = result.members;
-    total = result.total;
-  } catch {
-    loadError = true;
-  }
+  const initialMembers = members.map((m) => ({
+    ...m,
+    party: Array.isArray(m.party) ? m.party[0] ?? null : m.party,
+    state: Array.isArray(m.state) ? m.state[0] ?? null : m.state,
+    constituency: Array.isArray(m.constituency)
+      ? m.constituency[0] ?? null
+      : m.constituency,
+  }));
 
   return (
-    <div className="container-page py-10">
-      <h1 className="text-3xl font-bold text-navy-900">Rajya Sabha</h1>
-      <p className="mt-2 text-slate-600">
-        {total > 0 ? `${total} sitting members` : 'The upper house of the Parliament of India.'}
-      </p>
-
-      {loadError ? (
-        <p className="mt-6 rounded-md border border-amber-200 bg-amber-50 p-4 text-amber-800">
-          Couldn&apos;t load members right now — check your Supabase connection.
+    <main className="container mx-auto px-4 py-8">
+      <div className="mb-8">
+        <h1 className="text-3xl font-bold tracking-tight">Rajya Sabha</h1>
+        <p className="mt-2 text-muted-foreground">
+          Current Members of Parliament from the Council of States
         </p>
-      ) : (
-        <div className="mt-6">
-          {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
-          <MemberGrid house="rajya_sabha" initialMembers={members as any} initialTotal={total} />
-        </div>
-      )}
-    </div>
+      </div>
+
+      <MemberGrid
+        house="rajya_sabha"
+        initialMembers={initialMembers}
+        initialTotal={total}
+      />
+    </main>
   );
 }
